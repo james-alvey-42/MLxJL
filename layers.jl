@@ -13,7 +13,7 @@ mutable struct FullyConnected <: Layer
     Wgradient::Matrix{Float64}
     bgradient::Vector{Float64}
 end
-FullyConnected(;size::Tuple{Int64, Int64}, activation::Function = sigmoid) = FullyConnected(rand(size[1], size[2]), rand(size[1]), size, activation, [], [], [], rand(size[1], size[2]), rand(size[1]))
+FullyConnected(;size::Tuple{Int64, Int64}, activation::Function=sigmoid) = FullyConnected(rand(size[1], size[2]), rand(size[1]), size, activation, [], [], [], rand(size[1], size[2]), rand(size[1]))
 
 mutable struct Network
     layers::Vector{Layer}
@@ -38,10 +38,10 @@ function forward(x::Vector{Float64}, layer::FullyConnected)
         throw(DomainError("FullyConnected: Dimension mismatch between W and b"))
     end
     σ, W, b = layer.activation, layer.W, layer.b
-    y = σ(W * x + b)
-    ∇σ = map(v -> gradient(σ, v)[1], y)
+    s = W * x + b
+    ∇σ = map(v -> gradient(σ, v)[1], s)
     layer.x = x
-    layer.forward = y
+    layer.forward = σ(s)
     layer.gradient = ∇σ
     return σ(W * x + b)
 end
@@ -91,7 +91,7 @@ function backward(y::Int64, net::Network)
         bgradients = append!(bgradients, [layer.bgradient])
         W, b = layer.W, layer.b
     end
-    return [Wgradients, bgradients]
+    return net.loss, [Wgradients, bgradients]
 end
 
 function backward(Yt::Vector{Any}, Xt::Vector{Any}, net::Network, batch::Int64)
@@ -100,10 +100,12 @@ function backward(Yt::Vector{Any}, Xt::Vector{Any}, net::Network, batch::Int64)
     Y = Yt[nums]
     Wgradients = []
     bgradients = []
+    losses = []
     for idx in 1:length(X)
         x, y = X[idx], Y[idx]
         forward(x, net)
-        grads = backward(y, net)
+        loss, grads = backward(y, net)
+        losses = append!(losses, loss)
         Wgradients = append!(Wgradients, [grads[1]])
         bgradients = append!(bgradients, [grads[2]])
     end
@@ -114,6 +116,7 @@ function backward(Yt::Vector{Any}, Xt::Vector{Any}, net::Network, batch::Int64)
         layer.Wgradient = Wgradient
         layer.bgradient = bgradient
     end
+    return sum(losses)
 end
 
 
@@ -136,14 +139,17 @@ end
 
 function train(network, X, Y, kwargs...)
 end
-function train(net::Network, X::Vector{Any}, Y::Vector{Any}, α::Float64=1e-4, batch::Int64=64)
+function train(net::Network, X::Vector{Any}, Y::Vector{Any}, α::Float64=1e-4, batch::Int64=64, epochs=100)
     if length(X) != length(Y)
         throw(DomainError("train: X and Y must be the same length"))
     end
-    for i in 1:length(X)
-        backward(Y, X, net, batch)
+    losses = []
+    for i in 1:epochs
+        loss = backward(Y, X, net, batch)
+        losses = append!(losses, loss)
         update(net, α)
     end
+    return losses
 end
 
 function predict(network, X)
@@ -167,6 +173,10 @@ function crossentropy(y::Int64, p::Float64)
     return y * log(p) + (1 - y) * log(1 - p)
 end
 
+function crossentropy(y::Int64, p::Vector{Float64})
+    return y * log.(p) + (1 - y) * log.(1. .- p)
+end
+
 
 # Section: Activation Functions
 
@@ -183,6 +193,8 @@ end
 ReLU(u::Float64) = max(0., u)
 ReLU(u::Vector{Float64}) = map(v -> max(0., v), u)
 ReLU(u::Matrix{Float64}) = map(v -> max(0., v), u)
+
+# Section: Utils
 
 function color(y)
     if y == 1
