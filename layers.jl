@@ -13,11 +13,33 @@ mutable struct FullyConnected <: Layer
     Wgradient::Matrix{Float64}
     bgradient::Vector{Float64}
 end
-FullyConnected(;size::Tuple{Int64, Int64}, activation::Function=sigmoid) = FullyConnected(rand(size[1], size[2]), rand(size[1]), size, activation, [], [], [], rand(size[1], size[2]), rand(size[1]))
+FullyConnected(;size::Tuple{Int64, Int64}, activation::Function=ReLU) = FullyConnected(rand(size[1], size[2]), rand(size[1]), size, activation, [], [], [], rand(size[1], size[2]), rand(size[1]))
+
+mutable struct Convolutional <: Layer
+    W::Array{Float64, 3}
+    b::Array{Float64, 3}
+    kernel::Tuple{Int64, Int64}
+    filters::Int64
+    activation::Function
+    x::Matrix{Any}
+    forward::Array{Float64, 3}
+    gradient::Array{Float64, 3}
+    Wgradient::Array{Float64, 3}
+    bgradient::Array{Float64, 3}
+    padding::Bool
+end
+Convolutional(;kernel::Tuple{Int64, Int64}, filters::Int64, activation::Function=ReLU, padding::Bool=false) = Convolutional(rand(kernel..., filters), zeros(kernel..., filters), kernel, filters, activation, zeros(1, 1), zeros(1, 1, 1), zeros(1, 1, 1), zeros(1, 1, 1), zeros(1, 1, 1), padding)
+
+mutable struct Flatten <: Layer
+    x::Array{Float64, 3}
+    forward::Vector{Float64}
+    gradient::Bool
+end
+Flatten() = Flatten(zeros(1, 1, 1), [], false)
 
 mutable struct Network
     layers::Vector{Layer}
-    x::Vector{Any}
+    x
     forward::Vector{Any}
     backward::Vector{Any}
     depth::Int64
@@ -46,7 +68,72 @@ function forward(x::Vector{Float64}, layer::FullyConnected)
     return σ(W * x + b)
 end
 
+function forward(x::Matrix{Float64}, layer::Convolutional)
+    if any(layer.kernel .> size(x))
+        throw(DomainError("forward: input image smaller than kernel"))
+    end
+    if all(layer.b .== 0.)
+        if layer.padding
+            layer.b = rand(size(x)..., layer.filters)
+        else
+            layer.b = rand((size(x) .- 2)..., layer.filters)
+        end
+    end
+    is = size(x)
+    ks = layer.kernel
+    if layer.padding
+        out = zeros(size(x)..., layer.filters)
+        padded = zeros(Float64, size(x) .+ 2)
+        padded[2:size(x)[1] + 1, 2:size(x)[2] + 1] = x
+        for kidx in 1:layer.filters
+            kernel = layer.W[:, :, kidx]
+            for i in 1:is[1]
+                for j in 1:is[2]
+                    subimage = padded[i:i + ks[1] - 1, j:j + ks[2] - 1]
+                    entry = sum(subimage .* kernel)
+                    out[i, j, kidx] = entry
+                end
+            end
+        end
+    else
+        out = zeros((size(x) .- 2)..., layer.filters)
+        for kidx in 1:layer.filters
+            kernel = layer.W[:, :, kidx]
+            for i in 1:is[1] - 2
+                for j in 1:is[2] - 2
+                    subimage = x[i:i + ks[1] - 1, j:j + ks[2] - 1]
+                    entry = sum(subimage .* kernel)
+                    out[i, j, kidx] = entry
+                end
+            end
+        end
+    end
+    σ, W, b = layer.activation, layer.W, layer.b
+    s = out .+ b
+    ∇σ = map(v -> gradient(σ, v)[1], s)
+    layer.x = x
+    layer.forward = σ(s)
+    layer.gradient = ∇σ
+    return σ(s)
+end
+
+function forward(x, layer::Flatten)
+    layer.x = x
+    y = reshape(x, prod(size(x)))
+    layer.forward = y
+    return y
+end
+
 function forward(x::Vector{Float64}, net::Network)
+    net.x = x
+    net.forward = []
+    for layer in net.layers
+        x = forward(x, layer)
+        net.forward = append!(net.forward, [x])
+    end
+    return x
+end
+function forward(x::Matrix{Float64}, net::Network)
     net.x = x
     net.forward = []
     for layer in net.layers
@@ -84,12 +171,14 @@ function backward(y::Int64, net::Network)
     bgradients = append!(bgradients, [layer.bgradient])
     for step in 1:net.depth - 1
         layer = net.layers[net.depth - step]
-        delta = (W' * delta) .* layer.gradient
-        layer.Wgradient = delta .* layer.x'
-        layer.bgradient = delta
-        Wgradients = append!(Wgradients, [layer.Wgradient])
-        bgradients = append!(bgradients, [layer.bgradient])
-        W, b = layer.W, layer.b
+        if typeof(layer.gradient) != Bool
+            delta = (W' * delta) .* layer.gradient
+            layer.Wgradient = delta .* layer.x'
+            layer.bgradient = delta
+            Wgradients = append!(Wgradients, [layer.Wgradient])
+            bgradients = append!(bgradients, [layer.bgradient])
+            W, b = layer.W, layer.b
+        end
     end
     return net.loss, [Wgradients, bgradients]
 end
@@ -181,11 +270,12 @@ end
 # Section: Activation Functions
 
 function sigmoid(u)
-    return 1. / (1. + exp(-u))
+    return 1. / (1. + exp.(-u))
 end
 sigmoid(u::Float64) = 1. / (1. + exp(-u))
 sigmoid(u::Vector{Float64}) = 1. ./ (1. .+ exp.(-u))
 sigmoid(u::Matrix{Float64}) = 1. ./ (1. .+ exp.(-u))
+sigmoid(u::Array{Float64, 3}) = 1. ./ (1. .+ exp.(-u))
 
 function ReLU(u)
     return max(0., u)
@@ -193,6 +283,24 @@ end
 ReLU(u::Float64) = max(0., u)
 ReLU(u::Vector{Float64}) = map(v -> max(0., v), u)
 ReLU(u::Matrix{Float64}) = map(v -> max(0., v), u)
+RelU(u::Array{Float64, 3}) = map(v -> max(0., v), u)
+
+function LeakyReLU(u)
+    α = 0.1
+    return max(α * u, u)
+end
+LeakyReLU(u::Float64) = max(0.1 * u, u)
+LeakyReLU(u::Vector{Float64}) = map(v -> max(0.1 * v, v), u)
+LeakyReLU(u::Matrix{Float64}) = map(v -> max(0.1 * v, v), u)
+LeakyRelU(u::Array{Float64, 3}) = map(v -> max(0.1 * v, v), u)
+
+function softmax(h)
+    return exp(-h) / sum(exp(-h))
+end
+softmax(h::Float64) = 1.
+softmax(h::Vector{Float64}) = exp.(-h) / sum(exp.(-h))
+softmax(h::Matrix{Float64}) = exp.(-h) / sum(exp.(-h))
+softmax(h::Array{Float64, 3}) = exp.(-h) / sum(exp.(-h))
 
 # Section: Utils
 
